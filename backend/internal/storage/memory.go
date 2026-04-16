@@ -1,7 +1,9 @@
 package storage
 
 import (
+	"sort"
 	"sync"
+	"time"
 	"url-shortener/internal/models"
 )
 
@@ -34,6 +36,7 @@ func (s *MemoryStore) Set(code, longURL string) *models.URL {
 		LongURL:   longURL,
 		ShortCode: code,
 		Clicks:    0,
+		CreatedAt: time.Now().UTC(),
 	}
 
 	s.urls[code] = url
@@ -70,6 +73,10 @@ func (s *MemoryStore) GetAll() []*models.URL {
 	for _, url := range s.urls {
 		urls = append(urls, url)
 	}
+
+	sort.Slice(urls, func(i, j int) bool {
+		return urls[i].CreatedAt.After(urls[j].CreatedAt)
+	})
 
 	return urls
 }
