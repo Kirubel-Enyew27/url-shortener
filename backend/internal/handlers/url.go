@@ -2,6 +2,8 @@ package handlers
 
 import (
 	"net/http"
+	"strings"
+	"url-shortener/internal/config"
 	"url-shortener/internal/models"
 	"url-shortener/internal/services"
 
@@ -10,10 +12,11 @@ import (
 
 type URLHandler struct {
 	service *services.URLService
+	config  *config.Config
 }
 
-func New(service *services.URLService) *URLHandler {
-	return &URLHandler{service: service}
+func New(service *services.URLService, cfg *config.Config) *URLHandler {
+	return &URLHandler{service: service, config: cfg}
 }
 
 func (h *URLHandler) Shorten(c *gin.Context) {
@@ -30,7 +33,7 @@ func (h *URLHandler) Shorten(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, models.ShortenResponse{
-		ShortURL: "http://localhost:8080/" + url.ShortCode,
+		ShortURL: h.shortURLBase(c) + "/" + url.ShortCode,
 		Code:     url.ShortCode,
 	})
 }
@@ -58,4 +61,22 @@ func convertToSlice(urls []*models.URL) []models.URL {
 		result[i] = *url
 	}
 	return result
+}
+
+func (h *URLHandler) shortURLBase(c *gin.Context) string {
+	if h.config != nil && h.config.BaseURL != "" {
+		return h.config.BaseURL
+	}
+
+	scheme := c.GetHeader("X-Forwarded-Proto")
+	if scheme == "" {
+		scheme = "http"
+	}
+
+	host := c.GetHeader("X-Forwarded-Host")
+	if host == "" {
+		host = c.Request.Host
+	}
+
+	return strings.TrimRight(scheme+"://"+host, "/")
 }
