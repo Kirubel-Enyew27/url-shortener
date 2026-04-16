@@ -1,120 +1,363 @@
-import { useState } from 'react'
-import reactLogo from './assets/react.svg'
-import viteLogo from './assets/vite.svg'
-import heroImg from './assets/hero.png'
+import { useEffect, useMemo, useState } from 'react'
+import type { FormEvent } from 'react'
 import './App.css'
 
+type ShortenResponse = {
+  short_url: string
+  code: string
+}
+
+type URLItem = {
+  long_url: string
+  short_code: string
+  clicks: number
+  created_at?: string
+}
+
+type URLListResponse = {
+  urls: URLItem[]
+}
+
+type SortMode = 'newest' | 'oldest' | 'most-clicked'
+
+const API_BASE =
+  (import.meta.env.VITE_API_BASE_URL as string | undefined)?.replace(/\/$/, '') ??
+  ''
+
+function apiPath(path: string): string {
+  return API_BASE ? `${API_BASE}${path}` : path
+}
+
+function shortBaseUrl(): string {
+  if (API_BASE) return API_BASE
+  if (typeof window !== 'undefined') return window.location.origin
+  return 'http://localhost:8080'
+}
+
+function normalizeUrl(value: string): string {
+  const trimmed = value.trim()
+  if (!trimmed) return ''
+  if (/^https?:\/\//i.test(trimmed)) return trimmed
+  return `https://${trimmed}`
+}
+
+function formatDate(value?: string): string {
+  if (!value) return 'Unknown'
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return 'Unknown'
+  return date.toLocaleString(undefined, {
+    dateStyle: 'medium',
+    timeStyle: 'short',
+  })
+}
+
+function sortLinks(items: URLItem[], mode: SortMode): URLItem[] {
+  if (mode === 'most-clicked') {
+    return [...items].sort((a, b) => b.clicks - a.clicks)
+  }
+
+  if (items.every((item) => !item.created_at)) {
+    if (mode === 'oldest') {
+      return [...items].reverse()
+    }
+    return [...items]
+  }
+
+  const list = [...items]
+  switch (mode) {
+    case 'oldest':
+      list.sort(
+        (a, b) =>
+          new Date(a.created_at ?? 0).getTime() -
+          new Date(b.created_at ?? 0).getTime(),
+      )
+      return list
+    case 'newest':
+    default:
+      list.sort(
+        (a, b) =>
+          new Date(b.created_at ?? 0).getTime() -
+          new Date(a.created_at ?? 0).getTime(),
+      )
+      return list
+  }
+}
+
+function parseApiError(data: unknown, fallback: string): string {
+  if (typeof data === 'object' && data !== null && 'error' in data) {
+    const maybeError = (data as { error?: unknown }).error
+    if (typeof maybeError === 'string' && maybeError.trim()) {
+      return maybeError
+    }
+  }
+  return fallback
+}
+
+async function copyText(value: string): Promise<void> {
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(value)
+    return
+  }
+
+  const helper = document.createElement('textarea')
+  helper.value = value
+  helper.setAttribute('readonly', '')
+  helper.style.position = 'fixed'
+  helper.style.opacity = '0'
+  document.body.appendChild(helper)
+  helper.select()
+  const copied = document.execCommand('copy')
+  document.body.removeChild(helper)
+
+  if (!copied) {
+    throw new Error('Clipboard copy failed')
+  }
+}
+
 function App() {
-  const [count, setCount] = useState(0)
+  const [urlInput, setUrlInput] = useState('')
+  const [searchTerm, setSearchTerm] = useState('')
+  const [sortMode, setSortMode] = useState<SortMode>('newest')
+  const [shortened, setShortened] = useState<ShortenResponse | null>(null)
+  const [recent, setRecent] = useState<URLItem[]>([])
+  const [error, setError] = useState('')
+  const [isShortening, setIsShortening] = useState(false)
+  const [isLoadingRecent, setIsLoadingRecent] = useState(false)
+  const [copied, setCopied] = useState(false)
+  const [lastUpdated, setLastUpdated] = useState('')
+
+  const shortUrlBase = useMemo(() => shortBaseUrl(), [])
+
+  const visibleLinks = useMemo(() => {
+    const lowered = searchTerm.trim().toLowerCase()
+    const filtered = lowered
+      ? recent.filter(
+          (item) =>
+            item.short_code.toLowerCase().includes(lowered) ||
+            item.long_url.toLowerCase().includes(lowered),
+        )
+      : recent
+
+    return sortLinks(filtered, sortMode)
+  }, [recent, searchTerm, sortMode])
+
+  const totalClicks = useMemo(
+    () => recent.reduce((total, item) => total + item.clicks, 0),
+    [recent],
+  )
+
+  async function loadRecentLinks() {
+    setIsLoadingRecent(true)
+    setError('')
+
+    try {
+      const response = await fetch(apiPath('/api/urls'))
+      const data = (await response.json()) as URLListResponse | { error?: string }
+      if (!response.ok) {
+        throw new Error(parseApiError(data, 'Unable to fetch recent links.'))
+      }
+
+      setRecent((data as URLListResponse).urls)
+      setLastUpdated(formatDate(new Date().toISOString()))
+    } catch (err) {
+      const message =
+        err instanceof Error
+          ? err.message
+          : 'Something went wrong while loading links.'
+      setError(message)
+    } finally {
+      setIsLoadingRecent(false)
+    }
+  }
+
+  async function handleSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    const normalized = normalizeUrl(urlInput)
+
+    if (!normalized) {
+      setError('Please enter a URL.')
+      return
+    }
+
+    setIsShortening(true)
+    setError('')
+    setCopied(false)
+
+    try {
+      const response = await fetch(apiPath('/api/shorten'), {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ url: normalized }),
+      })
+
+      const data = (await response.json()) as ShortenResponse | { error?: string }
+      if (!response.ok) {
+        throw new Error(parseApiError(data, 'Could not shorten this URL.'))
+      }
+
+      setShortened(data as ShortenResponse)
+      setUrlInput('')
+      await loadRecentLinks()
+    } catch (err) {
+      const message =
+        err instanceof Error
+          ? err.message
+          : 'Something went wrong while shortening the URL.'
+      setError(message)
+    } finally {
+      setIsShortening(false)
+    }
+  }
+
+  async function handleCopy() {
+    if (!shortened) return
+
+    try {
+      await copyText(shortened.short_url)
+      setCopied(true)
+      setTimeout(() => setCopied(false), 1600)
+    } catch {
+      setError('Clipboard access is blocked in this browser context.')
+    }
+  }
+
+  useEffect(() => {
+    void loadRecentLinks()
+  }, [])
 
   return (
-    <>
-      <section id="center">
-        <div className="hero">
-          <img src={heroImg} className="base" width="170" height="179" alt="" />
-          <img src={reactLogo} className="framework" alt="React logo" />
-          <img src={viteLogo} className="vite" alt="Vite logo" />
-        </div>
-        <div>
-          <h1>Get started</h1>
-          <p>
-            Edit <code>src/App.tsx</code> and save to test <code>HMR</code>
-          </p>
-        </div>
-        <button
-          className="counter"
-          onClick={() => setCount((count) => count + 1)}
-        >
-          Count is {count}
-        </button>
-      </section>
+    <div className="page-shell">
+      <header className="hero">
+        <p className="eyebrow">Fast links. Cleaner sharing.</p>
+        <h1>URL Shortener</h1>
+        <p className="hero-subtitle">
+          Drop any long link and get a compact, trackable URL in seconds.
+        </p>
+      </header>
 
-      <div className="ticks"></div>
+      <main className="content-grid">
+        <section className="panel shorten-panel" aria-labelledby="shorten-title">
+          <div className="panel-head">
+            <h2 id="shorten-title">Create a short link</h2>
+            <button
+              type="button"
+              className="ghost-btn"
+              onClick={loadRecentLinks}
+              disabled={isLoadingRecent}
+            >
+              {isLoadingRecent ? 'Refreshing...' : 'Refresh list'}
+            </button>
+          </div>
 
-      <section id="next-steps">
-        <div id="docs">
-          <svg className="icon" role="presentation" aria-hidden="true">
-            <use href="/icons.svg#documentation-icon"></use>
-          </svg>
-          <h2>Documentation</h2>
-          <p>Your questions, answered</p>
-          <ul>
-            <li>
-              <a href="https://vite.dev/" target="_blank">
-                <img className="logo" src={viteLogo} alt="" />
-                Explore Vite
-              </a>
-            </li>
-            <li>
-              <a href="https://react.dev/" target="_blank">
-                <img className="button-icon" src={reactLogo} alt="" />
-                Learn more
-              </a>
-            </li>
-          </ul>
-        </div>
-        <div id="social">
-          <svg className="icon" role="presentation" aria-hidden="true">
-            <use href="/icons.svg#social-icon"></use>
-          </svg>
-          <h2>Connect with us</h2>
-          <p>Join the Vite community</p>
-          <ul>
-            <li>
-              <a href="https://github.com/vitejs/vite" target="_blank">
-                <svg
-                  className="button-icon"
-                  role="presentation"
-                  aria-hidden="true"
-                >
-                  <use href="/icons.svg#github-icon"></use>
-                </svg>
-                GitHub
-              </a>
-            </li>
-            <li>
-              <a href="https://chat.vite.dev/" target="_blank">
-                <svg
-                  className="button-icon"
-                  role="presentation"
-                  aria-hidden="true"
-                >
-                  <use href="/icons.svg#discord-icon"></use>
-                </svg>
-                Discord
-              </a>
-            </li>
-            <li>
-              <a href="https://x.com/vite_js" target="_blank">
-                <svg
-                  className="button-icon"
-                  role="presentation"
-                  aria-hidden="true"
-                >
-                  <use href="/icons.svg#x-icon"></use>
-                </svg>
-                X.com
-              </a>
-            </li>
-            <li>
-              <a href="https://bsky.app/profile/vite.dev" target="_blank">
-                <svg
-                  className="button-icon"
-                  role="presentation"
-                  aria-hidden="true"
-                >
-                  <use href="/icons.svg#bluesky-icon"></use>
-                </svg>
-                Bluesky
-              </a>
-            </li>
-          </ul>
-        </div>
-      </section>
+          <form onSubmit={handleSubmit} className="shorten-form">
+            <label htmlFor="url-input">Long URL</label>
+            <div className="input-row">
+              <input
+                id="url-input"
+                type="url"
+                value={urlInput}
+                onChange={(event) => {
+                  setUrlInput(event.target.value)
+                  if (error) setError('')
+                }}
+                placeholder="https://example.com/very/long/path"
+                autoComplete="off"
+                required
+              />
+              <button type="submit" disabled={isShortening}>
+                {isShortening ? 'Shortening...' : 'Shorten'}
+              </button>
+            </div>
+          </form>
 
-      <div className="ticks"></div>
-      <section id="spacer"></section>
-    </>
+          {error ? <p className="status error">{error}</p> : null}
+
+          {shortened ? (
+            <div className="result-card" role="status" aria-live="polite">
+              <p className="label">Latest short URL</p>
+              <a href={shortened.short_url} target="_blank" rel="noreferrer">
+                {shortened.short_url}
+              </a>
+              <div className="result-actions">
+                <button type="button" onClick={handleCopy} className="ghost-btn">
+                  {copied ? 'Copied' : 'Copy URL'}
+                </button>
+                <span>Code: {shortened.code}</span>
+              </div>
+            </div>
+          ) : null}
+        </section>
+
+        <section className="panel stats-panel" aria-labelledby="stats-title">
+          <h2 id="stats-title">Live stats</h2>
+          <div className="stats-grid">
+            <article>
+              <p>Total links</p>
+              <strong>{recent.length}</strong>
+            </article>
+            <article>
+              <p>Total clicks</p>
+              <strong>{totalClicks}</strong>
+            </article>
+            <article>
+              <p>Last updated</p>
+              <strong>{lastUpdated || 'Not yet loaded'}</strong>
+            </article>
+          </div>
+        </section>
+
+        <section className="panel list-panel" aria-labelledby="recent-title">
+          <div className="panel-head">
+            <h2 id="recent-title">Recent links</h2>
+            <span>{visibleLinks.length} visible</span>
+          </div>
+
+          <div className="list-tools">
+            <input
+              type="search"
+              value={searchTerm}
+              onChange={(event) => setSearchTerm(event.target.value)}
+              placeholder="Filter by code or URL"
+              aria-label="Filter links"
+            />
+            <select
+              value={sortMode}
+              onChange={(event) => setSortMode(event.target.value as SortMode)}
+              aria-label="Sort links"
+            >
+              <option value="newest">Newest</option>
+              <option value="oldest">Oldest</option>
+              <option value="most-clicked">Most clicked</option>
+            </select>
+          </div>
+
+          {visibleLinks.length === 0 ? (
+            <p className="status">No links match your filters yet.</p>
+          ) : (
+            <ul className="links-list">
+              {visibleLinks.map((item) => (
+                <li key={item.short_code}>
+                  <a
+                    href={`${shortUrlBase}/${item.short_code}`}
+                    target="_blank"
+                    rel="noreferrer"
+                  >
+                    {shortUrlBase}/{item.short_code}
+                  </a>
+                  <p title={item.long_url}>{item.long_url}</p>
+                  <div className="link-meta">
+                    <span>{item.clicks} clicks</span>
+                    <span>Created {formatDate(item.created_at)}</span>
+                  </div>
+                </li>
+              ))}
+            </ul>
+          )}
+        </section>
+      </main>
+    </div>
   )
 }
 
